@@ -1,0 +1,20 @@
+﻿/* globals requirejs */
+requirejs.config({
+    baseUrl: '/js',
+    urlArgs: 'bust=20230420',
+    paths: {
+        'jquery': 'jquery-3.5.1.min',
+        'jquery-migrate': 'jquery-migrate-3.0.1',
+        'jquery-ui': 'jquery-ui-1.12.1.min',
+        'jquery-faq': 'jquery-faq-2.0.0.min',
+        'backbone': 'backbone-1.4.0',
+        'underscore': 'underscore-1.8.3.min',
+        'fancybox': 'jquery.fancybox-1.3.4.min',
+        'jquery.showLoading': 'jquery.showLoading.min',
+        'jquery.validate': 'jquery.validate.min',
+        'controls/loginProxyControl': 'controls/loginProxyControl.min',
+        'controls/recover': 'controls/recover.min',
+        'controls/recoverProxy': 'controls/recoverProxy.min',
+        'controls/header': 'controls/header.min'
+	}
+});

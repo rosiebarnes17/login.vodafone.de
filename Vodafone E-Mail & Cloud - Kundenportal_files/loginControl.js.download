@@ -1,0 +1,196 @@
+﻿/* globals define */
+define(["underscore", "backbone", "jquery", "codeInputFields"], function (_, Backbone, $, CodeInputFields) {
+    function uuid() {
+        function hex(len, x) {
+            if (x === undefined) x = Math.random();
+            var s = new Array(len);
+            for (var i = 0; i < len; i++) {
+                x *= 16;
+                var digit = x & 15;
+                s[i] = digit + (digit < 10 ? 48 : 87); // '0' and 'a' - 10
+            }
+            return String.fromCharCode.apply(String, s);
+        }
+        return [hex(8), "-", hex(4), "-4", hex(3), "-", hex(4, 0.5 + Math.random() / 4), "-", hex(12)].join("");
+    }
+
+    var templateSettings = {
+        'evaluate': /<#([\s\S]+?)#>/g,
+        'interpolate': /<#=([\s\S]+?)#>/g,
+        'escape': /<#-([\s\S]+?)#>/g
+    };
+
+    var UserName = Backbone.Model.extend({
+        defaults: {
+            username: '',
+            password: ''
+        },
+        idAttribute: 'username',
+        parse: function (data) {
+            return data.d;
+        },
+        validate: function (attrs) {
+            var errors = [];
+            if (!attrs.username) {
+                errors.push('Bitte dib Deine E-Mail-Adresse ein.');
+            } else {
+                if (!attrs.password) {
+                    errors.push('Bitte gib Dein Passwort ein.');
+                }
+            }
+            return ((errors.length > 0) ? errors : false);
+        }
+    });
+
+    var LoginPanel = Backbone.View.extend({
+        initialize: function (options) {
+            var view = this;
+            view.options = options;
+            view.template = _.template($(options.panelTmpl).html(), templateSettings);
+        },
+        showLoginForm: function () {
+            this.$('input[name="pwd"]').val('')
+            this.$el.find('[data-element="login-form"]').show();
+            this.$el.find('[data-element="totp-form"]').hide();
+
+            $('#errorbox').slideUp();
+            $('#errorbox-mfa').slideUp();
+        },
+        showTotpForm: function () {
+            this.$el.find('[data-element="login-form"]').hide();
+            this.$el.find('[data-element="totp-form"]').show();
+            this.codeInputFields.resetCode();
+            $('#errorbox').slideUp();
+            $('#errorbox-mfa').slideUp();
+        },
+        events: {
+            'keypress input[name="username"], input[name="pwd"]': function (ev) {
+                if (ev.which === 13) {
+                    ev.preventDefault();
+                    $('input[name="login"]', this.$el).click();
+                }
+            },
+            'keypress #codeFields .input-field': function (ev) {
+                if (ev.which === 13) {
+                    $('input[name="authenticate"]', this.$el).click();
+                }
+            },
+            'click #toggle-pw-visibility': function (e) {
+                var input = $('input[name="pwd"]');
+                if (input.attr('type') === "password") {
+                    input.attr('type', "text");
+                    $(e.currentTarget).attr('src', 'img/eye_disable_password.svg');
+                } else {
+                    input.attr('type', "password");
+                    $(e.currentTarget).attr('src', 'img/eye_view_password.svg');
+                }
+            },
+            'click input[name="back"]': function () {
+                this.showLoginForm();
+            },
+            'click input[name="login"]': function () {
+                var view = this;
+                var model = new UserName({
+                    username: this.$('input[name="username"]').val().trim(),
+                    password: this.$('input[name="pwd"]').val().trim()
+                });
+
+                $('#logoutbox').slideUp();
+
+                if (model.isValid()) {
+                    view.$('.progress-container').show();
+                    $.ajax({
+                        type: "POST",
+                        url: view.options.serviceUrl + "/loginCustomer",
+                        data: JSON.stringify({ request: model }),
+                        contentType: "application/json; charset=utf-8",
+                        complete: function () {
+                            view.$('.progress-container').hide();
+                        }
+                    })
+                    .done(function (data) {
+                        $('.alertinfo').hide();
+                        if (data.d.state === 0) {
+                            if (data.d.redirect === 'totp') {
+                                view.showTotpForm();
+                                return;
+                            } else {
+                                window.location.href = data.d.redirect;
+                            }
+                        } else {
+                            switch (data.d.code) {
+                                case 'E_DISABLED':
+                                    $('#quarantinebox').slideDown();
+                                    break;
+                                default:
+                                    $('#errorbox').slideDown();
+                                    $('#password-tip').css('color', '#BD0000');
+                                    $('input[name="username"]').add($('input[name="pwd"]')).css('border-color', '#BD0000');
+                                    break;
+                            }
+                        }
+                    })
+                    .fail(function () {
+                        $('#errorbox').slideDown();
+                    });
+                } else {
+                    $('#errorbox').slideDown();
+                    $('#password-tip').css('color', '#BD0000');
+                    $('input[name="username"]').add($('input[name="pwd"]')).css('border-color', '#BD0000');
+                }
+            },
+            'click input[name="authenticate"]': function () {
+                var view = this;
+
+                function showMFAError() {
+                    $('#errorbox-mfa').slideDown();
+                    $('#codeFields .input-field').css('border-color', '#BD0000');
+                }
+
+                var totpCode = view.codeInputFields.getCode();
+
+                if (totpCode && totpCode.length == 6) {
+                    $.ajax({
+                        type: "POST",
+                        url: view.options.serviceUrl + "/ValidateCode",
+                        data: JSON.stringify({ request: { code: view.codeInputFields.getCode() } }),
+                        contentType: "application/json; charset=utf-8",
+                        complete: function () {
+                        }
+                    })
+                        .done(function (data) {
+                            if (data.d.state === 0) {
+                                window.location.href = data.d.redirect;
+                            } else {
+                                view.codeInputFields.resetCode();
+
+                                showMFAError();
+                            }
+                        })
+                        .fail(function () {
+                            showMFAError();
+                        });
+                } else {
+                    showMFAError();
+                }
+            }
+        },
+        render: function () {
+            var self = this;
+            this.$el.html(this.template.call(this));
+
+            this.codeInputFields = new CodeInputFields($('#codeFields', this.$el)[0], {
+                onDone: function () {
+                    $('input[name="authenticate"]', self.$el).trigger('click');
+                }
+            });
+                
+            return this;
+        },
+        focus: function (selector) {
+            this.$el.find(selector).focus();
+        }  
+    });
+
+    return LoginPanel;
+});

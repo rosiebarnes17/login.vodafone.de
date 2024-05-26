@@ -1,0 +1,165 @@
+/* globals _, Backbone, define, require, passwordStrength */
+(function (factory) {
+    if (typeof define === "function" && define.amd) {
+        // AMD. Register as anonymous module.
+        define([
+            'jquery',
+        ], factory);
+    } else if (typeof exports === "object") {
+        // Node / CommonJS
+        factory(require("jquery"));
+    } else {
+        // Browser globals.
+        factory(jQuery);
+    }
+})(function () {
+
+    var CodeInputFields = function (element, config) {
+
+        var self = this;
+
+        this.defaultConfig = {
+            countFields: 6,
+            inputClass: '',
+            containerClass: '',
+            keysAllowed: [
+                "0",
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+            ]
+        };
+
+        this.getCode = function () {
+            var code = '';
+            var inputFields = this.container.querySelectorAll('[data-code-field="true"]');
+            inputFields.forEach(function (inputField) {
+                code += inputField.value;
+            });
+
+            return code;
+        };
+
+        this.resetCode = function () {
+            var inputFields = this.container.querySelectorAll('[data-code-field="true"]');
+            inputFields.forEach(function (inputField) {
+                inputField.value = '';
+            });
+
+            inputFields[0].focus();
+        };
+
+
+        this.config = {};
+
+        this.init = function (element, config) {
+            this.config = Object.assign({}, this.defaultConfig, config);
+
+            var fieldsContainer = document.createElement('div');
+            fieldsContainer.className = 'fields-container ' + this.config.containerClass;
+
+            this.container = fieldsContainer;
+
+            var firstInputField = null;
+
+            for (var i = 0; i < this.config.countFields; i++) {
+                var inputField = document.createElement('input');
+                inputField.type = 'text';
+                inputField.setAttribute('data-code-field', 'true');
+                inputField.setAttribute('data-index', i);
+                inputField.setAttribute('inputmode', 'numeric');
+                inputField.className = 'input-field ' + this.config.inputClass;
+                inputField.maxLength = 1;
+                inputField.autocorrect = 'off';
+                inputField.autocapitalize = 'off';
+                inputField.spellcheck = false;
+
+                if (!firstInputField) {
+                    firstInputField = inputField;
+                }
+
+                inputField.addEventListener('input', function (e) {
+                    var curr = e.currentTarget;
+                    if (e.currentTarget.value === '') return;
+
+                    if (curr.nextElementSibling) {
+                        if (e.inputType === 'insertText') {
+                            curr.nextElementSibling.focus();
+                        }
+                    } else if (self.config.onDone) {
+                        self.config.onDone(self.getCode());
+                    }
+                });
+
+                inputField.addEventListener('keypress', function (e) {
+                    if (!self.config.keysAllowed.includes(e.key)) {
+                        e.preventDefault();
+                    } else {
+                        e.currentTarget.value = ''
+                    }
+                });
+
+                inputField.addEventListener('paste', function (e) {
+                    var pastedString = self.getStringFromClipboard(e);
+                    if (!pastedString) return;
+                    self.setPastedText(e.currentTarget, pastedString, 0);
+                    e.stopPropagation();
+                    e.preventDefault();
+                });
+
+                fieldsContainer.appendChild(inputField);
+            }
+
+            element.appendChild(fieldsContainer);
+
+            if (firstInputField) {
+                setTimeout(function () { firstInputField.focus() }, 10);
+            }
+
+        };
+
+        this.setPastedText = function (inputField, text, index) {
+            if (text[index] === undefined) return;
+
+            if (self.config.keysAllowed.includes(text[index])) {
+                inputField.value = text[index];
+                inputField.focus();
+                if (inputField.nextElementSibling) {
+                    setTimeout(function () { self.setPastedText(inputField.nextElementSibling, text, index + 1); }, 0);
+                } else if (self.config.onDone) {
+                    self.config.onDone(self.getCode());
+                }
+
+            } else {
+                setTimeout(function () { self.setPastedText(inputField, text, index + 1); }, 0);
+            }
+        };
+
+        this.getStringFromClipboard = function (e) {
+            var pastedString = '';
+            if (e.clipboardData && e.clipboardData.getData('text')) {
+                pastedString = e.clipboardData.getData('text');
+                if (pastedString) {
+                    pastedString = pastedString.trim();
+                }
+            }
+
+            return pastedString;
+        };
+
+        this.init(element, config);
+    };
+
+    return CodeInputFields;
+
+
+
+
+
+});

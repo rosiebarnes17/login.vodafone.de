@@ -1,0 +1,588 @@
+﻿/* globals define */
+define(["underscore", "backbone", "jquery", 'codeInputFields', 'qrcode.min'], function (_, Backbone, $, CodeInputFields) {
+
+    var countDownInstance = null;
+
+    var templateSettings = {
+        'evaluate': /<#([\s\S]+?)#>/g,
+        'interpolate': /<#=([\s\S]+?)#>/g,
+        'escape': /<#-([\s\S]+?)#>/g
+    };
+
+    function CountDown(options) {
+        var self = this;
+        var countDownDate = new Date(options.date).getTime();
+        this.start = function () {
+            self.calculate();
+            self.interval = setInterval(function () {
+                self.calculate();
+            }, 1000);
+        }
+        this.calculate = function () {
+            var now = new Date().getTime();
+            var distance = countDownDate - now;
+            var oneHour = 1000 * 60 * 60;
+            var days = Math.floor(distance / (oneHour * 24));
+            var hours = Math.floor((distance % (oneHour * 24)) / (oneHour));
+            var minutes = Math.floor((distance % (oneHour)) / (1000 * 60));
+            var seconds = Math.floor((distance % (1000 * 60)) / 1000);
+            if (distance < 0) {
+                clearInterval(self.interval);
+                if (options.finished) options.finished();
+            }
+            options.tick({
+                days: days,
+                hours: hours,
+                minutes: minutes,
+                seconds: seconds
+            });
+        }
+
+        this.start();
+    }
+
+    var errorTranslate = function (code) {
+        var codes = {
+            'E_CAPTCHA_REQUIRED': 'Bitte gib die Zeichenkette ein!',
+            'E_CAPTCHA_INVALID': 'Bitte gib die korrekte Zeichenkette ein!',
+            'E_TOTP_REQUIRED': 'Bitte gib Deinen Code ein!',
+            'E_TOTP_INVALID': 'Der Code ist nicht gültig!',
+            'E_TYPE_REQUIRED': 'Bitte wähl eine Option aus!',
+            'E_TYPE_INVALID': 'Option ist nicht gültig.',
+            'E_CODE_REQUIRED': 'Bitte gib Deinen Freischaltcode ein.',
+            'E_CODE_INVALID': 'Dies ist kein gültiger Freischaltcode. Bitte überprüf Deine Eingabe.',
+            'E_CODE_EXPIRED': 'Der Freischaltcode ist nicht gültig. Bitte überprüf Deine Eingabe.',
+            'E_CODE_SMS_RENEW_LIMIT': 'Du hast für diese Mobilfunk-Nummer zu oft einen neuen Freischaltcode angefordert.',
+            'E_CODE_MAX_TRIES': 'Du hast den Freischaltcode zu oft falsch eingegeben. Forder jetzt einen neuen Code an. Du bist kurz gesperrt. Danach geht’s wieder. Oder wähl eine andere Option und starte die Freischaltung nochmal.',
+            'E_UNKNOWN_ERROR': 'Die Anfrage konnte leider nicht verarbeitet werden!',
+
+        }
+        return codes[code] ? codes[code] : codes['E_UNKNOWN_ERROR'];
+    }
+
+    function getTemplate(id) {
+        return _.template($(id).html(), templateSettings);
+    }
+
+    var RecoverTwoFaStartModel = Backbone.Model.extend({
+        defaults: {
+            captcha: ''
+        },
+        validate: function (attrs) {
+            var errors = [];
+            if (!attrs.captcha) {
+                errors.push({ message: errorTranslate('E_CAPTCHA_REQUIRED'), el: 'captcha' });
+            }
+            return ((errors.length > 0) ? errors : false);
+        }
+    });
+
+    var RecoverTwoFaTypeModel = Backbone.Model.extend({
+        defaults: {
+            type: ''
+        },
+        validate: function (attrs) {
+            var errors = [];
+            if (!attrs.type) {
+                errors.push({
+                    message: errorTranslate('E_TYPE_REQUIRED'),
+                    el: 'type'
+                });
+            }
+            return ((errors.length > 0) ? errors : false);
+        }
+    });
+
+    var RecoverTwoFaCodeModel = Backbone.Model.extend({
+        defaults: {
+            code: ''
+        },
+        validate: function (attrs) {
+            var errors = [];
+            if (!attrs.code) {
+                errors.push({
+                    message: errorTranslate('E_CODE_REQUIRED'),
+                    el: 'code'
+                });
+            }
+            return ((errors.length > 0) ? errors : false);
+        }
+    });
+
+    var RecoverTwoFaTotpModel = Backbone.Model.extend({
+        defaults: {
+            totp: ''
+        },
+        validate: function (attrs) {
+            var errors = [];
+            if (!attrs.totp) {
+                errors.push({
+                    message: errorTranslate('E_TOTP_REQUIRED'),
+                    el: 'totp'
+                });
+            }
+            return ((errors.length > 0) ? errors : false);
+        }
+    });
+
+    var BaseView = Backbone.View.extend({
+        onError: function (message, element, duration) {
+            var error = $('<div class="error">' + message + '</div>');
+            $('div[data-error="' + element + '"]', this.$el).append(error);
+            setTimeout(function () {
+                error.fadeOut({
+                    complete: function () {
+                        error.remove();
+                    }
+                });
+            }, duration || 4000);
+        },
+        attachBaseListener: function () {
+            var self = this;
+            this.$el.find('input[type="text"], input[type="email"], input[type="password"]').on('keyup', function (e) {
+                if (e.key === 'Enter') {
+                    self.$el.find('[data-command="next-step"]').trigger('click');
+                }
+            });
+
+            var focusElement = this.$el.find('[data-element="init-focus"]');
+            if (focusElement) {
+                setTimeout(function () { focusElement.focus() }, 10);
+            }
+        }
+    })
+
+    var RecoverTwoFaView = Backbone.View.extend({
+        initialize: function (options) {
+            var self = this;
+            this.options = options;
+            this.steps = [RecoverTwoFaStartView, RecoverTwoFaVerificationOptionsView, RecoverTwoFaVerificationCodeView, RecoverTwoFaQRCodeView, RecoverTwoFaTotpView, RecoverTwoFaSuccessView];
+            this.oldStep = 0;
+            this.currentStep = 0;
+
+            this.options.onPreviousStep = function () {
+                self.oldStep = self.currentStep;
+                self.currentStep = self.currentStep - 1;
+                self.render();
+            }
+            this.options.onNextStep = function () {
+                self.oldStep = self.currentStep;
+                self.currentStep = self.currentStep + 1;
+                self.render();
+            }
+            this.options.isNextStep = function () {
+                return self.oldStep < self.currentStep;
+            }
+            this.options.isPreviousStep = function () {
+                return self.oldStep > self.currentStep;
+            }
+        },
+        render: function () {
+            var view = new this.steps[this.currentStep](this.options);
+            this.$el.html(view.render().$el);
+            return this;
+        }
+    });
+
+    var RecoverTwoFaStartView = BaseView.extend({
+        initialize: function (options) {
+            this.options = options;
+            this.model = new RecoverTwoFaStartModel();
+            this.template = getTemplate('#twofa-recover-start-template')
+        },
+        render: function () {
+            this.$el.html(this.template.call(this));
+            this.attachBaseListener();
+            return this;
+        },
+        captchaUrl: function () {
+            return (this.options.captchaUrl + '?' + Math.random());
+        },
+        events: {
+            'click input[name="captcha-new"]': function () {
+                this.$('#' + this.cid + '-captcha-image').attr('src', this.captchaUrl());
+            },
+            'click [data-command="next-step"]': function (e) {
+                var self = this;
+                this.model.set({
+                    captcha: $('input[name="captcha"]', this.$el).val().trim()
+                });
+
+                if (this.model.isValid()) {
+
+                    $('.progress-container', self.$el).show();
+                    $('[data-command="next-step"]', self.$el).prop('disabled', true);
+
+                    $.ajax({
+                        type: 'POST',
+                        url: self.options.serviceUrl + '/TwoFaRecoverOptions',
+                        data: JSON.stringify(this.model),
+                        contentType: "application/json; charset=utf-8",
+                        complete: function () {
+                            $('.progress-container', self.$el).hide();
+                            $('[data-command="next-step"]', self.$el).prop('disabled', false);
+                        },
+                        success: function (data) {
+
+                            if (data.d.state === 0) {
+                                self.options.optionList = data.d.optionList;
+
+                                self.options.onNextStep();
+                            } else {
+                                if (data.d.code === 'E_CAPTCHA_INVALID') {
+                                    self.onError(errorTranslate(data.d.code), 'captcha');
+                                } else if (data.d.code === 'E_NO_CONTACT') {
+                                    self.template = getTemplate('#twofa-recover-email-no-contacts-template')
+                                    self.render();
+
+                                } else {
+                                    self.onError(errorTranslate(data.d.code), 'recover');
+                                }
+
+                                $('[name="captcha-new"]', self.$el).trigger('click');
+                                $('input[name="captcha"]', self.$el).val('')
+                            }
+
+                        }
+                    });
+                } else {
+                    var errors = this.model.validationError;
+                    _.each(errors, function (err) {
+                        self.onError(err.message, err.el);
+                    });
+                }
+            },
+            'click [data-command="render-default"]': function (e) {
+                this.template = getTemplate('#twofa-recover-email-template')
+                this.render();
+            },
+            'click [data-command="previous-step"]': function (e) {
+                this.options.onPreviousStep();
+            },
+
+        }
+    });
+
+    var RecoverTwoFaVerificationOptionsView = BaseView.extend({
+        initialize: function (options) {
+            this.options = options;
+            this.model = new RecoverTwoFaTypeModel();
+            this.template = getTemplate('#twofa-recover-verification-options-template')
+        },
+        render: function () {
+            this.$el.html(this.template.call(this));
+            return this;
+        },
+        events: {
+            'input input[name="type"]': function (e) {
+                $('.option-item', this.$el).removeClass('active');
+                $(e.currentTarget).parent().addClass('active');
+            },
+            'click [data-command="next-step"]': function (e) {
+                var self = this;
+                this.model.set({
+                    type: $('input:radio[name=type]:checked', self.$el).val()
+                });
+
+                if (this.model.isValid()) {
+
+                    $('.progress-container', self.$el).show();
+                    $('[data-command="next-step"]', self.$el).prop('disabled', true);
+
+                    $.ajax({
+                        type: 'POST',
+                        url: self.options.serviceUrl + '/TwoFaSendRecoverCode',
+                        data: JSON.stringify(this.model),
+                        contentType: "application/json; charset=utf-8",
+                        complete: function () {
+                            $('.progress-container', self.$el).hide();
+                            $('[data-command="next-step"]', self.$el).prop('disabled', false);
+                        },
+                        success: function (data) {
+                            if (data.d.state === 0) {
+                                self.options.type = self.model.get('type');
+                                self.options.address = data.d.address;
+                                self.options.config = data.d.config;
+                                self.options.onNextStep();
+                            } else if (data.d.code === 'E_CODE_SMS_RENEW_LIMIT') {
+                                self.onError(errorTranslate(data.d.code), 'type');
+                            } else {
+                                self.onError(errorTranslate(data.d.code), 'recover');
+                            }
+                        }
+                    });
+                } else {
+                    var errors = this.model.validationError;
+                    _.each(errors, function (err) {
+                        self.onError(err.message, err.el);
+                    });
+                }
+            },
+            'click [data-command="previous-step"]': function (e) {
+                this.options.onPreviousStep();
+            }
+        }
+    });
+
+    var RecoverTwoFaVerificationCodeView = BaseView.extend({
+        initialize: function (options) {
+            this.options = options;
+            this.model = new RecoverTwoFaCodeModel();
+            this.template = getTemplate('#twofa-recover-verification-code-template')
+        },
+        render: function (disableCountDown) {
+            var self = this;
+
+            this.$el.html(this.template.call(this));
+
+            if (countDownInstance) {
+                clearInterval(countDownInstance.interval);
+            }
+
+            if (!disableCountDown) {
+                var remainingTime = new Date(new Date(self.options.address.ValidationKeyCreated).getTime() + self.options.config.ValidationPeriodInMinutes * 60000);
+
+                countDownInstance = new CountDown({
+                    date: remainingTime,
+                    tick: function (d) {
+                        var minutes = d.minutes.toString();
+                        var seconds = d.seconds.toString();
+                        if (seconds.length === 1) {
+                            seconds = '0' + seconds;
+                        }
+                        if (minutes.length === 1) {
+                            minutes = '0' + minutes;
+                        }
+
+                        var restTime = minutes + ':' + seconds;
+
+                        $('[data-element="remaining-time"]', self.$el).text(restTime);
+                    },
+                    finished: function () {
+                        self.template = getTemplate('#twofa-recover-verification-code-expired-template')
+                        self.render(true);
+                    }
+                });
+            }
+            this.codeInputFields = new CodeInputFields($('#codeFields', this.$el)[0]);
+            this.attachBaseListener();
+
+            return this;
+        },
+        events: {
+            'click [data-command="resend-code"]': function (e) {
+                var self = this;
+
+                $('.progress-container', self.$el).show();
+                $('[data-command="resend-code"]', self.$el).prop('disabled', true);
+
+                var model = new RecoverTwoFaTypeModel();
+                model.set({
+                    type: self.options.type
+                });
+
+                $.ajax({
+                    type: 'POST',
+                    url: self.options.serviceUrl + '/TwoFaSendRecoverCode',
+                    data: JSON.stringify(model),
+                    contentType: "application/json; charset=utf-8",
+                    complete: function () {
+                        $('.progress-container', self.$el).hide();
+                        $('[data-command="resend-code"]', self.$el).prop('disabled', false);
+                    },
+                    success: function (data) {
+                        if (data.d.state === 0) {
+                            self.options.address = data.d.address;
+                            self.template = getTemplate('#twofa-recover-verification-code-template')
+                            self.render();
+                        }  else {
+                            self.onError(errorTranslate(data.d.code), 'recover');
+                        }
+                    }
+                });
+
+            },
+            'click [data-command="next-step"]': function (e) {
+                var self = this;
+                this.model.set({
+                    code: this.codeInputFields.getCode(),
+                    type: self.options.type
+                });
+
+                if (this.model.isValid()) {
+
+                    $('.progress-container', self.$el).show();
+                    $('[data-command="next-step"]', self.$el).prop('disabled', true);
+
+                    $.ajax({
+                        type: 'POST',
+                        url: self.options.serviceUrl + '/TwoFaValidateRecoverCode',
+                        data: JSON.stringify(this.model),
+                        contentType: "application/json; charset=utf-8",
+                        complete: function () {
+                            $('.progress-container', self.$el).hide();
+                            $('[data-command="next-step"]', self.$el).prop('disabled', false);
+                        },
+                        success: function (data) {
+                            if (data.d.state === 0) {
+
+                                if (countDownInstance) {
+                                    clearInterval(countDownInstance.interval);
+                                }
+
+                                self.options.twofa = {
+                                    issuer: data.d.issuer,
+                                    label: data.d.label,
+                                    secretCode: data.d.secretCode,
+                                }
+
+                                self.options.onNextStep();
+
+                            } else if (data.d.code === 'E_CODE_MAX_TRIES') {
+                                self.template = getTemplate('#twofa-recover-verification-code-max-tries-template')
+                                self.render();
+                            } else {
+                                self.codeInputFields.resetCode()
+                                self.onError(errorTranslate(data.d.code), 'recover');
+                            }
+                        }
+                    });
+                } else {
+                    var errors = this.model.validationError;
+                    _.each(errors, function (err) {
+                        self.onError(err.message, err.el);
+                    });
+                }
+            },
+            'click [data-command="previous-step"]': function (e) {
+                if (countDownInstance) {
+                    clearInterval(countDownInstance.interval);
+                }
+
+                this.options.onPreviousStep();
+            },
+
+        }
+    });
+
+    var RecoverTwoFaQRCodeView = BaseView.extend({
+        initialize: function (options) {
+            this.options = options;
+            this.template = getTemplate('#twofa-recover-qrcode-template')
+        },
+        render: function () {
+            this.$el.html(this.template.call(this));
+
+            new QRCode($('#qrcode', this.$el)[0], this.generateQRCodeUrl(this.options.twofa.issuer, this.options.twofa.label, this.options.twofa.secretCode));
+
+            return this;
+        },
+        generateQRCodeUrl: function (issuer, accountName, secretKey, algorithm = 'SHA1') {
+            // Parameter:
+            // - issuer: Der Name des Diensteanbieters (z.B., 'MyApp').
+            // - accountName: Der Kontoname des Benutzers (z.B., 'john.doe@example.com').
+            // - secretKey: Der geheime Schlüssel für die TOTP-Generierung.
+            // - algorithm: Der verwendete Hash-Algorithmus (z.B., 'SHA1', 'SHA256', 'SHA512').
+
+            // URL-Zusammensetzung nach dem TOTP URI-Schema: https://github.com/google/google-authenticator/wiki/Key-Uri-Format
+            var encodedIssuer = encodeURIComponent(issuer);
+            var encodedAccountName = encodeURIComponent(accountName);
+            var encodedSecretKey = encodeURIComponent(secretKey);
+            var encodedAlgorithm = encodeURIComponent(algorithm);
+
+            var url = `otpauth://totp/${encodedIssuer}:${encodedAccountName}?secret=${encodedSecretKey}&issuer=${encodedIssuer}&algorithm=${encodedAlgorithm}`;
+
+            return url;
+        },
+        events: {
+            'click [data-command="next-step"]': function (e) {
+                this.options.onNextStep();
+            },
+            'click [data-command="previous-step"]': function (e) {
+                this.options.onPreviousStep();
+            },
+
+        }
+    });
+
+    var RecoverTwoFaTotpView = BaseView.extend({
+        initialize: function (options) {
+            this.options = options;
+            this.model = new RecoverTwoFaTotpModel();
+            this.template = getTemplate('#twofa-recover-totp-template');
+        },
+        render: function () {
+            this.$el.html(this.template.call(this));
+            this.codeInputFields = new CodeInputFields($('#codeFields', this.$el)[0]);
+            this.attachBaseListener();
+
+
+            return this;
+        },
+        events: {
+            'click [data-command="next-step"]': function (e) {
+                var self = this;
+                this.model.set({
+                    totp: this.codeInputFields.getCode()
+                });
+
+                if (this.model.isValid()) {
+
+                    $('.progress-container', self.$el).show();
+                    $('[data-command="next-step"]', self.$el).prop('disabled', true);
+
+                    $.ajax({
+                        type: 'POST',
+                        url: self.options.serviceUrl + '/TwoFaRecoverTotpCode',
+                        data: JSON.stringify(this.model),
+                        contentType: "application/json; charset=utf-8",
+                        complete: function () {
+                            $('.progress-container', self.$el).hide();
+                            $('[data-command="next-step"]', self.$el).prop('disabled', false);
+                        },
+                        success: function (data) {
+
+                            if (data.d.state === 0) {
+                                self.options.onNextStep();
+                            } else {
+                                self.codeInputFields.resetCode()
+                                if (data.d.code === 'E_TOTP_INVALID') {
+                                    self.onError(errorTranslate(data.d.code), 'totp');
+
+                                } else {
+                                    self.onError(errorTranslate(data.d.code), 'recover');
+                                }
+                            }
+
+                        }
+                    });
+                } else {
+                    var errors = this.model.validationError;
+                    _.each(errors, function (err) {
+                        self.onError(err.message, err.el);
+                    });
+                }
+            },
+            'click [data-command="previous-step"]': function (e) {
+                this.options.onPreviousStep();
+            },
+
+        }
+    });
+
+    var RecoverTwoFaSuccessView = BaseView.extend({
+        initialize: function (options) {
+            this.options = options;
+            this.template = getTemplate('#twofa-recover-success-template')
+        },
+        render: function () {
+            this.$el.html(this.template.call(this));
+            return this;
+        }
+    });
+
+
+
+
+    return RecoverTwoFaView;
+});
